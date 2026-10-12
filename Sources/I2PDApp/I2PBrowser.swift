@@ -198,51 +198,70 @@ private struct I2PWebView: UIViewRepresentable {
 }
 
 struct BrowserView: View {
+    @EnvironmentObject private var router: RouterStore
     @EnvironmentObject private var settings: BrowserSettingsStore
     @StateObject private var browser = I2PBrowser()
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                TextField("i2pd.i2p", text: $browser.address)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
-                    .submitLabel(.go)
-                    .onSubmit { browser.openAddress() }
-                Button("Go") { browser.openAddress() }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding()
+            if router.canBrowse {
+                HStack {
+                    TextField("i2pd.i2p", text: $browser.address)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .submitLabel(.go)
+                        .onSubmit { browser.openAddress() }
+                    Button("Go") { browser.openAddress() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding()
 
-            if browser.isLoading { ProgressView().frame(maxWidth: .infinity) }
-            if let error = browser.errorMessage {
-                Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-            }
+                if browser.isLoading { ProgressView().frame(maxWidth: .infinity) }
+                if let error = browser.errorMessage {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                }
 
-            if browser.webView.url == nil {
-                Button("Try i2pd.i2p") { browser.openExample() }
-                    .font(.footnote)
-                    .padding(.bottom, 8)
-            }
+                if browser.webView.url == nil {
+                    Button("Try i2pd.i2p") { browser.openExample() }
+                        .font(.footnote)
+                        .padding(.bottom, 8)
+                }
 
-            I2PWebView(browser: browser)
-                .background(Color(uiColor: .systemBackground))
+                I2PWebView(browser: browser)
+                    .background(Color(uiColor: .systemBackground))
 
-            HStack(spacing: 24) {
-                Button { browser.goBack() } label: { Image(systemName: "chevron.left") }
-                    .disabled(!browser.canGoBack)
-                Button { browser.goForward() } label: { Image(systemName: "chevron.right") }
-                    .disabled(!browser.canGoForward)
+                HStack(spacing: 24) {
+                    Button { browser.goBack() } label: { Image(systemName: "chevron.left") }
+                        .disabled(!browser.canGoBack)
+                    Button { browser.goForward() } label: { Image(systemName: "chevron.right") }
+                        .disabled(!browser.canGoForward)
+                    Spacer()
+                    Button { browser.reload() } label: { Image(systemName: "arrow.clockwise") }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+            } else {
                 Spacer()
-                Button { browser.reload() } label: { Image(systemName: "arrow.clockwise") }
+                if router.state == .starting || router.state == .running {
+                    ProgressView()
+                } else {
+                    Image(systemName: "network.slash")
+                        .foregroundStyle(.secondary)
+                }
+                Text(router.browserReadiness.label)
+                    .font(.headline)
+                    .padding(.top, 12)
+                Text("Browsing will be available when I2P is ready.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                Spacer()
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 12)
         }
         .navigationTitle(browser.pageTitle)
         .navigationBarTitleDisplayMode(.inline)
@@ -262,6 +281,9 @@ struct BrowserView: View {
         }
         .onChange(of: settings.javaScriptEnabled) { _, _ in
             applySettings()
+        }
+        .onChange(of: router.canBrowse) { _, ready in
+            if !ready { browser.webView.stopLoading() }
         }
     }
 

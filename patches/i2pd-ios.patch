@@ -69,7 +69,7 @@
  
  		s << "  <a href=\"" << webroot << "?cmd=" << HTTP_COMMAND_SHUTDOWN_NOW << "&token=" << token << "\">" << tr("Force shutdown") << "</a><br><br>\r\n";
 +		#else
-+		s << "  Stop the router from the iPhone app. Transit routing is disabled.<br><br>\r\n";
++		s << "  Stop the router from the iPhone app. New transit tunnels are declined during graceful shutdown.<br><br>\r\n";
 +		#endif
  		s << "  <a href=\"" << webroot << "?cmd=" << HTTP_COMMAND_RELOAD_CSS << "&token=" << token << "\">" << tr("Reload external CSS styles") << "</a>\r\n";
  		s << "</div>";
@@ -99,7 +99,7 @@
 +			cmd == HTTP_COMMAND_LIMITTRANSIT || cmd == HTTP_COMMAND_SHUTDOWN_START ||
 +			cmd == HTTP_COMMAND_SHUTDOWN_CANCEL || cmd == HTTP_COMMAND_SHUTDOWN_NOW)
 +		{
-+			ShowError (s, "Use the iPhone app to control the router; transit routing is disabled.");
++			ShowError (s, "Use the iPhone app to control the router and transit shutdown.");
 +			return;
 +		}
 +		#endif

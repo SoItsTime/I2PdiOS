@@ -33,7 +33,7 @@ struct RouterDiagnosticsView: View {
             Section("Overview") {
                 LabeledContent("Router", value: routerState)
                 if let snapshot {
-                    LabeledContent("Connection", value: connectionPhase(snapshot))
+                    LabeledContent("Connection", value: router.browserReadiness.label)
                     LabeledContent("Network status", value: networkStatus(snapshot.network_status,
                         testing: snapshot.network_testing, error: snapshot.network_error))
                     if snapshot.supports_v6 != 0 {
@@ -108,11 +108,12 @@ struct RouterDiagnosticsView: View {
                 Section("Network database") {
                     LabeledContent("Routers known", value: snapshot.known_routers.formatted())
                     LabeledContent("Floodfills known", value: snapshot.known_floodfills.formatted())
+                    LabeledContent("Floodfill on this iPhone", value: snapshot.is_floodfill != 0 ? "On" : "Off (i2pd default)")
                     LabeledContent("LeaseSets known", value: snapshot.known_lease_sets.formatted())
                     if snapshot.known_floodfills == 0 {
                         ProgressView("Discovering floodfill routers…")
                     }
-                    Text("This app does not run in floodfill mode; the count is the floodfill routers it knows about.")
+                    Text("Floodfill stores network directory entries for other routers. It is normally off and is not needed for browsing or transit routing. The count above shows other floodfill routers this app knows about.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -123,12 +124,21 @@ struct RouterDiagnosticsView: View {
                     LabeledContent("Creation success", value: "\(snapshot.tunnel_success_percent)%")
                     LabeledContent("Total creation success", value: "\(snapshot.total_tunnel_success_percent)%")
                     LabeledContent("Transit", value: snapshot.transit_tunnels.formatted())
+                    LabeledContent("Transit requests", value: snapshot.accepts_transit_tunnels != 0 ? "Allowed" : "Declined")
+                    LabeledContent("Advertised contact route", value: snapshot.transit_contact_route != 0 ? "Available" : "Not available")
+                    LabeledContent("Transit bandwidth limit", value: "\(snapshot.transit_bandwidth_limit_kib) KiB/s")
+                    LabeledContent("Transit tunnel limit", value: snapshot.max_transit_tunnels.formatted())
                     LabeledContent("Tunnel queue", value: snapshot.tunnel_queue_size.formatted())
                     LabeledContent("Build message queue", value: snapshot.tunnel_build_queue_size.formatted())
                     if snapshot.inbound_tunnels == 0 || snapshot.outbound_tunnels == 0 {
                         ProgressView("Building tunnels…")
                     }
-                    Text("Transit routing is disabled in this app.")
+                    if snapshot.transit_contact_route == 0 {
+                        Text("This router has no advertised contact route yet, so other routers cannot choose it for transit.")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                    Text("A transit count above zero means this router is relaying for others. A zero count means none are active yet; selection may take longer than a minute, and mobile networks can still block incoming connections.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -149,6 +159,7 @@ struct RouterDiagnosticsView: View {
                 Section("Local services") {
                     LabeledContent("HTTP proxy", value: snapshot.http_proxy_ready != 0 ? "127.0.0.1:4444" : "Starting…")
                     LabeledContent("SOCKS proxy", value: snapshot.socks_proxy_ready != 0 ? "127.0.0.1:4447" : "Starting…")
+                    LabeledContent("Browser tunnels", value: snapshot.socks_destination_ready != 0 ? "Ready" : "Building…")
                     if !text(of: snapshot.http_proxy_destination).isEmpty {
                         Text("HTTP destination: \(text(of: snapshot.http_proxy_destination))")
                             .font(.caption.monospaced())
@@ -205,13 +216,6 @@ struct RouterDiagnosticsView: View {
         case .stopping: "Stopping"
         case .failed: "Failed"
         }
-    }
-
-    private func connectionPhase(_ value: I2PDStatusSnapshot) -> String {
-        if value.connected_peers == 0 { return "Connecting to peers" }
-        if value.inbound_tunnels == 0 || value.outbound_tunnels == 0 { return "Building tunnels" }
-        if value.known_addresses == 0 { return "Loading names" }
-        return "Ready to browse"
     }
 
     private func networkStatus(_ status: Int32, testing: Int32, error: Int32) -> String {

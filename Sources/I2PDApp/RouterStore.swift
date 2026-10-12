@@ -21,7 +21,34 @@ final class RouterStore: ObservableObject {
         case failed(String)
     }
 
+    enum BrowserReadiness: Equatable {
+        case stopped
+        case starting
+        case connectingPeers
+        case buildingTunnels
+        case startingProxy
+        case buildingBrowserTunnels
+        case ready
+        case stopping
+        case failed
+
+        var label: String {
+            switch self {
+            case .stopped: "Router stopped"
+            case .starting: "Starting i2pd…"
+            case .connectingPeers: "Connecting to I2P peers…"
+            case .buildingTunnels: "Building I2P tunnels…"
+            case .startingProxy: "Starting browser connection…"
+            case .buildingBrowserTunnels: "Preparing browser tunnels…"
+            case .ready: "Browser connection ready"
+            case .stopping: "Disconnecting…"
+            case .failed: "Could not connect"
+            }
+        }
+    }
+
     @Published private(set) var state: State = .stopped
+    @Published private(set) var browserReadiness: BrowserReadiness = .stopped
     @Published private(set) var shutdownStartedAt: Date?
     @Published private(set) var shutdownDeadline: Date?
     @Published private(set) var shutdownConnectedPeers = 0
@@ -40,6 +67,8 @@ final class RouterStore: ObservableObject {
     private let shutdownActivity = ShutdownLiveActivity()
     private var awayFromForeground = false
     private var shutdownMonitor: Task<Void, Never>?
+    private var readinessMonitor: Task<Void, Never>?
+    private var readinessLossSamples = 0
     private var shutdownBackgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     init() {
@@ -52,6 +81,8 @@ final class RouterStore: ObservableObject {
     func start() {
         guard state == .stopped || isFailed else { return }
         state = .starting
+        browserReadiness = .starting
+        readinessLossSamples = 0
 
         do {
             let directory = try prepareDataDirectory()
@@ -64,17 +95,67 @@ final class RouterStore: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.state = succeeded ? .running : .failed(message.isEmpty ? "Router could not start" : message)
+                    if succeeded { self.monitorBrowserReadiness() }
+                    else { self.browserReadiness = .failed }
                     self.syncBackgroundAudio()
                 }
             }
         } catch {
             state = .failed(error.localizedDescription)
+            browserReadiness = .failed
+        }
+    }
+
+    var canBrowse: Bool { state == .running && browserReadiness == .ready }
+
+    private func monitorBrowserReadiness() {
+        readinessMonitor?.cancel()
+        refreshBrowserReadiness()
+        readinessMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled, let self, self.state == .running else { return }
+                self.refreshBrowserReadiness()
+            }
+        }
+    }
+
+    private func refreshBrowserReadiness() {
+        guard state == .running else { return }
+        var snapshot = I2PDStatusSnapshot()
+        let next: BrowserReadiness
+        if i2pd_get_status(&snapshot) != 1 || snapshot.connected_peers == 0 ||
+            snapshot.network_error == 1 || snapshot.network_error == 2 {
+            next = .connectingPeers
+        } else if snapshot.inbound_tunnels == 0 || snapshot.outbound_tunnels == 0 {
+            next = .buildingTunnels
+        } else if snapshot.socks_proxy_ready == 0 {
+            next = .startingProxy
+        } else if snapshot.socks_destination_ready == 0 {
+            next = .buildingBrowserTunnels
+        } else {
+            next = .ready
+        }
+        if next == .ready {
+            readinessLossSamples = 0
+            browserReadiness = .ready
+        } else if browserReadiness == .ready {
+            // A tunnel can briefly disappear while i2pd replaces it. Avoid
+            // interrupting an open page for a single missed snapshot.
+            readinessLossSamples += 1
+            if readinessLossSamples >= 3 { browserReadiness = next }
+        } else {
+            browserReadiness = next
         }
     }
 
     func stop() {
         guard state == .running else { return }
         state = .stopping
+        readinessMonitor?.cancel()
+        readinessMonitor = nil
+        readinessLossSamples = 0
+        browserReadiness = .stopping
         coreStopQueued = false
         forceDisconnecting = false
         let started = Date()
@@ -151,6 +232,7 @@ final class RouterStore: ObservableObject {
                 self.shutdownActivity.end()
                 self.endShutdownBackgroundTask()
                 self.state = .stopped
+                self.browserReadiness = .stopped
                 self.shutdownStartedAt = nil
                 self.shutdownDeadline = nil
                 self.shutdownConnectedPeers = 0

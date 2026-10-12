@@ -78,8 +78,6 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
             std::vector<std::string> arguments {
                 "i2pd",
                 std::string("--datadir=") + data_dir,
-                "--notransit",
-                "--share=0",
                 "--reseed.verify=true",
                 "--persist.addressbook=true",
                 "--persist.profiles=true",
@@ -101,7 +99,7 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
                 "--i2pcontrol.enabled=false",
                 "--upnp.enabled=false",
                 "--ntcp2.published=false",
-                "--ssu2.published=false"
+                "--ssu2.published=true"
             };
             std::vector<char *> argv;
             argv.reserve(arguments.size());
@@ -118,8 +116,16 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
             initialized = true;
         }
 
-        i2p::api::StartI2P();
+        // The embedded API parses bandwidth/share options but, unlike the
+        // standalone daemon, does not apply them to RouterContext. Without a
+        // bandwidth limit, i2pd treats transit as fully congested and rejects
+        // every build request. Use the daemon's low-bandwidth profile and a
+        // bounded number of transit tunnels for this mobile router.
+        i2p::context.SetBandwidth('L'); // 48 KiB/s
+        i2p::context.SetShareRatio(100);
+        i2p::tunnel::tunnels.SetMaxNumTransitTunnels(64);
         i2p::context.SetAcceptsTunnels(true);
+        i2p::api::StartI2P();
         try {
             i2p::client::context.Start();
             webConsole = std::make_unique<i2p::http::HTTPServer>("127.0.0.1", 7070);
@@ -179,6 +185,7 @@ int i2pd_get_status(I2PDStatusSnapshot *out) {
     out->network_status = static_cast<int32_t>(i2p::context.GetStatus());
     out->known_routers = i2p::data::netdb.GetNumRouters();
     out->known_floodfills = i2p::data::netdb.GetNumFloodfills();
+    out->is_floodfill = i2p::context.IsFloodfill() ? 1 : 0;
     out->known_lease_sets = i2p::data::netdb.GetNumLeaseSets();
     out->known_addresses = i2p::client::context.GetAddressBook().GetNumAddresses();
     out->addressbook_syncing = i2p::client::context.GetAddressBook().IsSubscriptionDownloading() ? 1 : 0;
@@ -190,13 +197,21 @@ int i2pd_get_status(I2PDStatusSnapshot *out) {
     out->inbound_tunnels = i2p::tunnel::tunnels.CountInboundTunnels();
     out->outbound_tunnels = i2p::tunnel::tunnels.CountOutboundTunnels();
     out->transit_tunnels = i2p::tunnel::tunnels.CountTransitTunnels();
+    out->accepts_transit_tunnels = i2p::context.AcceptsTunnels() ? 1 : 0;
+    out->transit_bandwidth_limit_kib = static_cast<uint32_t>(i2p::context.GetTransitBandwidthLimit());
+    out->max_transit_tunnels = i2p::tunnel::tunnels.GetMaxNumTransitTunnels();
+    out->transit_contact_route = i2p::context.GetRouterInfo().IsReachableBy(i2p::data::RouterInfo::eAllTransports) ? 1 : 0;
     out->tunnel_success_percent = i2p::tunnel::tunnels.GetTunnelCreationSuccessRate();
     out->received_bytes = i2p::transport::transports.GetTotalReceivedBytes();
     out->sent_bytes = i2p::transport::transports.GetTotalSentBytes();
     out->receive_bytes_per_second = i2p::transport::transports.GetInBandwidth15s();
     out->send_bytes_per_second = i2p::transport::transports.GetOutBandwidth15s();
     out->http_proxy_ready = i2p::client::context.GetHttpProxy() ? 1 : 0;
-    out->socks_proxy_ready = i2p::client::context.GetSocksProxy() ? 1 : 0;
+    if (auto proxy = i2p::client::context.GetSocksProxy()) {
+        out->socks_proxy_ready = 1;
+        auto destination = proxy->GetLocalDestination();
+        out->socks_destination_ready = destination && destination->IsReady() ? 1 : 0;
+    }
     out->network_status_v6 = static_cast<int32_t>(i2p::context.GetStatusV6());
     out->supports_v6 = i2p::context.SupportsV6() ? 1 : 0;
     out->network_testing = i2p::context.GetTesting() ? 1 : 0;

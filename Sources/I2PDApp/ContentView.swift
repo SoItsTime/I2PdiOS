@@ -9,8 +9,12 @@ struct ContentView: View {
                 Section("Router") {
                     HStack {
                         Image(systemName: "network")
-                            .foregroundStyle(router.state == .running ? .green : .secondary)
+                            .foregroundStyle(router.canBrowse ? .green : .secondary)
                         Text(statusText)
+                    }
+                    if router.state == .starting ||
+                        (router.state == .running && !router.canBrowse) {
+                        ProgressView(router.browserReadiness.label)
                     }
                     if case let .failed(message) = router.state {
                         Text(message).foregroundStyle(.red).font(.footnote)
@@ -51,8 +55,10 @@ struct ContentView: View {
                     } label: {
                         Label("Open I2P browser", systemImage: "globe")
                     }
-                    .disabled(router.state != .running)
-                    Text("The browser uses the router's local SOCKS proxy on port 4447 and only opens .i2p addresses. Allow a few minutes after starting for the router to join the network.")
+                    .disabled(!router.canBrowse)
+                    Text(router.canBrowse
+                         ? "The browser connection is ready. Individual I2P sites may still take time to respond."
+                         : "The browser opens after i2pd connects to peers and builds working tunnels.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -106,7 +112,7 @@ struct ContentView: View {
         switch router.state {
         case .stopped: "Stopped"
         case .starting: "Starting…"
-        case .running: "Running"
+        case .running: router.canBrowse ? "Browser connection ready" : "Connecting to I2P…"
         case .stopping: "Disconnecting…"
         case .failed: "Could not start"
         }

@@ -29,6 +29,8 @@ The optional background audio loop is experimental. A background task offers lim
 
 The built-in browser accepts only `.i2p` destinations and uses i2pd's loopback SOCKS proxy. JavaScript starts disabled. The router's HTTP and SOCKS proxies bind to loopback. This is a prototype, and a successful build does not establish that connectivity or background execution will work on every device.
 
+The embedded router allows transit tunnels while running, with a 48 KiB/s bandwidth limit and a 64-tunnel cap. It advertises SSU2 so that other routers can find a contact route; NTCP2 remains unpublished because incoming TCP may be blocked on mobile networks. Live Diagnostics shows whether transit requests are allowed, whether a contact route exists, how many transit tunnels are active, and how much transit traffic has passed through this router. A zero count means no transit tunnels are active at that moment; other routers may take time to select it, and network reachability varies by connection. Graceful shutdown declines new transit tunnels while existing ones finish.
+
 ## Donations
 
 If you like the project and want to support it, donations are optional:

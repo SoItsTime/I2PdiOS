@@ -19,6 +19,7 @@ typedef struct I2PDStatusSnapshot {
     int32_t network_status;
     uint32_t known_routers;
     uint32_t known_floodfills;
+    int32_t is_floodfill;
     uint32_t known_lease_sets;
     uint32_t known_addresses;
     int32_t addressbook_syncing;
@@ -28,6 +29,10 @@ typedef struct I2PDStatusSnapshot {
     uint32_t inbound_tunnels;
     uint32_t outbound_tunnels;
     uint32_t transit_tunnels;
+    int32_t accepts_transit_tunnels;
+    uint32_t transit_bandwidth_limit_kib;
+    uint32_t max_transit_tunnels;
+    int32_t transit_contact_route;
     int32_t tunnel_success_percent;
     uint64_t received_bytes;
     uint64_t sent_bytes;
@@ -35,6 +40,7 @@ typedef struct I2PDStatusSnapshot {
     uint32_t send_bytes_per_second;
     int32_t http_proxy_ready;
     int32_t socks_proxy_ready;
+    int32_t socks_destination_ready;
     int32_t network_status_v6;
     int32_t supports_v6;
     int32_t network_testing;
