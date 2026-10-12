@@ -39,23 +39,37 @@ fi
 
 openssl_archive="$cache/openssl-3.5.8.tar.gz"
 openssl_source="$cache/openssl-3.5.8"
-if [[ ! -f "$vendor/OpenSSL/iphoneos/libssl.a" || ! -f "$vendor/OpenSSL/iphonesimulator/libssl.a" ]]; then
+ios_deployment_target=17.0
+openssl_needs_build=false
+for platform in iphoneos iphonesimulator; do
+  target="$vendor/OpenSSL/$platform"
+  if [[ ! -f "$target/libssl.a" || ! -f "$target/libcrypto.a" || \
+        ! -f "$target/.ios-deployment-target" || \
+        "$(cat "$target/.ios-deployment-target" 2>/dev/null)" != "$ios_deployment_target" ]]; then
+    openssl_needs_build=true
+  fi
+done
+if [[ "$openssl_needs_build" == true ]]; then
   download https://www.openssl.org/source/openssl-3.5.8.tar.gz "$openssl_archive"
   verify a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2 "$openssl_archive"
   if [[ ! -d "$openssl_source" ]]; then
     tar -xzf "$openssl_archive" -C "$cache"
   fi
-  jobs="$(sysctl -n hw.ncpu)"
+  jobs="${I2PD_BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
   for platform in iphoneos iphonesimulator; do
     target="$vendor/OpenSSL/$platform"
-    if [[ -f "$target/libssl.a" && -f "$target/libcrypto.a" ]]; then continue; fi
+    if [[ -f "$target/libssl.a" && -f "$target/libcrypto.a" && \
+          -f "$target/.ios-deployment-target" && \
+          "$(cat "$target/.ios-deployment-target")" == "$ios_deployment_target" ]]; then continue; fi
     if [[ "$platform" == iphoneos ]]; then configure_target=ios64-xcrun
     else configure_target=iossimulator-arm64-xcrun; fi
     build="$cache/openssl-build-$platform"
     install="$cache/openssl-install-$platform"
+    rm -rf "$build" "$install"
     mkdir -p "$build" "$install" "$target"
     (
       cd "$build"
+      export IPHONEOS_DEPLOYMENT_TARGET="$ios_deployment_target"
       "$openssl_source/Configure" "$configure_target" no-shared no-tests no-apps no-module \
         "--prefix=$install" --libdir=lib
       make -j "$jobs"
@@ -64,6 +78,7 @@ if [[ ! -f "$vendor/OpenSSL/iphoneos/libssl.a" || ! -f "$vendor/OpenSSL/iphonesi
     mkdir -p "$target/include"
     cp -R "$install/include/." "$target/include/"
     cp "$install/lib/libssl.a" "$install/lib/libcrypto.a" "$target/"
+    printf '%s\n' "$ios_deployment_target" > "$target/.ios-deployment-target"
   done
 fi
 

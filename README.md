@@ -8,6 +8,8 @@ Source for an experimental iPhone app embedding [i2pd](https://github.com/Purple
 2. Run `./scripts/bootstrap.sh` on a Mac. This downloads pinned i2pd, Boost, and OpenSSL sources, applies `patches/i2pd-ios.patch`, builds OpenSSL for iPhone and Apple Silicon Simulator, renders the app icon from its SVG source, and generates `I2PdiOS.xcodeproj`.
 3. Open `I2PdiOS.xcodeproj`, select the `I2PDApp` scheme, set your own development team and bundle identifier, then build for your iPhone.
 
+For an unsigned iPhone IPA that can be signed with your own certificate and provisioning profile, run `./scripts/build-unsigned-ipa.sh /path/to/i2pd.ipa` after bootstrapping. The IPA includes the app and its Live Activity extension; both must be signed for installation. The packaged app uses the placeholder bundle ID `website.i2pd.ios.prototype`, which your signer may need to change to match your profile.
+
 The repository contains source, the icon's SVG source, bootstrap names, and the i2pd patch. `Vendor/`, downloaded certificates, compiled libraries, the generated icon PNG, Xcode output, profiles, and local router data are ignored by Git. The bootstrap script retrieves i2pd's **public reseed certificates** into the ignored `Vendor/` directory because verified reseeding requires them. No personal keys or certificates are supplied.
 
 The app stores its router keys and address book in its own Application Support directory on the device. Those files are created at runtime and are never part of this repository.
