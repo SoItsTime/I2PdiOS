@@ -8,7 +8,10 @@ extern "C" {
 #endif
 
 // Returns 1 on success, 0 on failure. Error is a UTF-8, NUL-terminated string.
-int i2pd_start_router(const char *data_dir, char *error, int error_capacity);
+int i2pd_start_router(const char *data_dir, const char *outproxy_url,
+                      const char *reseed_url, char *error, int error_capacity);
+// Changes the running HTTP proxy's I2P outproxy without stopping the router.
+int i2pd_set_outproxy(const char *outproxy_url, char *error, int error_capacity);
 // Stops accepting new transit tunnels while keeping existing connections alive.
 int i2pd_begin_graceful_shutdown(void);
 void i2pd_stop_router(void);
@@ -39,6 +42,7 @@ typedef struct I2PDStatusSnapshot {
     uint32_t receive_bytes_per_second;
     uint32_t send_bytes_per_second;
     int32_t http_proxy_ready;
+    int32_t http_destination_ready;
     int32_t socks_proxy_ready;
     int32_t socks_destination_ready;
     int32_t network_status_v6;
@@ -67,6 +71,14 @@ int i2pd_get_status(I2PDStatusSnapshot *out);
 // Returns UTF-8 JSON bytes (without a trailing NUL) or the required capacity.
 // Returns -1 when the live address book is unavailable.
 int32_t i2pd_copy_address_book_json(char *buffer, int32_t capacity);
+
+// Torrent operations use the embedded i2pd torrent tunnel, with no RPC listener.
+// All calls are safe from a background queue. Action: 0 pause, 1 resume,
+// 2 remove torrent but keep downloaded data, 3 remove downloaded data too.
+int32_t i2pd_copy_torrents_json(char *buffer, int32_t capacity);
+int i2pd_add_magnet(const char *magnet, char *error, int error_capacity);
+int i2pd_add_torrent_file(const uint8_t *bytes, int32_t length, char *error, int error_capacity);
+int i2pd_torrent_action(int32_t id, int32_t action, char *error, int error_capacity);
 
 #ifdef __cplusplus
 }

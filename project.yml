@@ -1,4 +1,11 @@
 name: I2PdiOS
+schemes:
+  I2PDApp:
+    build:
+      targets:
+        I2PDApp: all
+    run:
+      config: Debug
 options:
   deploymentTarget:
     iOS: "17.0"
@@ -46,7 +53,6 @@ targets:
           - MAC_OSX=1
           - BOOST_ALL_NO_LIB=1
           - OPENSSL_SUPPRESS_DEPRECATED=1
-          - NO_TORRENTS=1
           - I2PD_IOS=1
   I2PDApp:
     type: application
@@ -63,7 +69,11 @@ targets:
       path: Sources/I2PDApp/Info.plist
       properties:
         CFBundleDisplayName: i2pd
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         NSSupportsLiveActivities: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UIBackgroundModes:
           - audio
         NSAppTransportSecurity:
@@ -99,6 +109,8 @@ targets:
     info:
       path: Sources/I2PDShutdownWidget/Info.plist
       properties:
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:

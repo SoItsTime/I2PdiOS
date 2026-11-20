@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import UIKit
 
 struct SavedRouterData {
@@ -12,6 +13,7 @@ struct SavedRouterData {
 final class RouterStore: ObservableObject {
     // Match i2pd's documented maximum graceful-shutdown countdown.
     private static let gracefulShutdownSeconds: TimeInterval = 10 * 60
+    private static let customReseedURLKey = "customReseedURL"
 
     enum State: Equatable {
         case stopped
@@ -55,6 +57,11 @@ final class RouterStore: ObservableObject {
     @Published private(set) var shutdownTransitTunnels = 0
     @Published private(set) var coreStopQueued = false
     @Published private(set) var forceDisconnecting = false
+    @Published private(set) var activeOutproxyURL: String? = nil
+    @Published private(set) var customReseedURL: String
+    @Published private(set) var activeReseedURL: String? = nil
+    @Published private(set) var outproxyError: String? = nil
+    @Published private(set) var outproxyApplying = false
     @Published var keepRunningInBackground: Bool {
         didSet {
             UserDefaults.standard.set(keepRunningInBackground, forKey: "keepRunningInBackground")
@@ -73,28 +80,43 @@ final class RouterStore: ObservableObject {
 
     init() {
         keepRunningInBackground = UserDefaults.standard.bool(forKey: "keepRunningInBackground")
+        customReseedURL = Self.normalizedReseedURL(
+            UserDefaults.standard.string(forKey: Self.customReseedURLKey) ?? "") ?? ""
         Task { @MainActor [weak self] in
             self?.shutdownActivity.endActivitiesLeftByAnEarlierLaunch()
         }
     }
 
-    func start() {
+    func start(outproxyURL: String? = nil) {
         guard state == .stopped || isFailed else { return }
         state = .starting
         browserReadiness = .starting
         readinessLossSamples = 0
+        activeOutproxyURL = nil
+        activeReseedURL = nil
+        outproxyError = nil
+        outproxyApplying = false
 
         do {
             let directory = try prepareDataDirectory()
+            let requestedOutproxy = outproxyURL ?? ""
+            let requestedReseed = customReseedURL
             queue.async { [weak self] in
                 var error = [CChar](repeating: 0, count: 1024)
-                let succeeded = directory.path.withCString {
-                    i2pd_start_router($0, &error, Int32(error.count)) == 1
+                let succeeded = directory.path.withCString { path in
+                    requestedOutproxy.withCString { outproxy in
+                        requestedReseed.withCString { reseed in
+                            i2pd_start_router(path, outproxy, reseed,
+                                              &error, Int32(error.count)) == 1
+                        }
+                    }
                 }
                 let message = String(cString: error)
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.state = succeeded ? .running : .failed(message.isEmpty ? "Router could not start" : message)
+                    self.activeOutproxyURL = succeeded && !requestedOutproxy.isEmpty ? requestedOutproxy : nil
+                    self.activeReseedURL = succeeded && !requestedReseed.isEmpty ? requestedReseed : nil
                     if succeeded { self.monitorBrowserReadiness() }
                     else { self.browserReadiness = .failed }
                     self.syncBackgroundAudio()
@@ -107,6 +129,109 @@ final class RouterStore: ObservableObject {
     }
 
     var canBrowse: Bool { state == .running && browserReadiness == .ready }
+
+    static func normalizedReseedURL(_ input: String) -> String? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { return "" }
+        guard value.utf8.count <= 2048,
+              !value.contains(where: { $0.isWhitespace || ",@#?\\".contains($0) }),
+              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              var parts = URLComponents(string: value),
+              parts.scheme?.lowercased() == "https",
+              let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil,
+              parts.query == nil, parts.fragment == nil else { return nil }
+        if let port = parts.port, !(1...65535).contains(port) { return nil }
+        parts.scheme = "https"
+        guard let url = parts.url else { return nil }
+        var normalized = url.absoluteString
+        if !normalized.hasSuffix(".su3") && !normalized.hasSuffix("/") {
+            normalized += "/"
+        }
+        return normalized
+    }
+
+    func saveCustomReseedURL(_ input: String) -> Bool {
+        guard let normalized = Self.normalizedReseedURL(input) else { return false }
+        customReseedURL = normalized
+        if normalized.isEmpty { UserDefaults.standard.removeObject(forKey: Self.customReseedURLKey) }
+        else { UserDefaults.standard.set(normalized, forKey: Self.customReseedURLKey) }
+        return true
+    }
+
+    func installReseedCertificate(from source: URL) throws -> String {
+        guard source.pathExtension.lowercased() == "crt" else {
+            throw NSError(domain: "I2PdiOS", code: 10,
+                          userInfo: [NSLocalizedDescriptionKey: "Choose a PEM .crt certificate"])
+        }
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        let data = try Data(contentsOf: source)
+        guard data.count <= 128 * 1024,
+              let pem = String(data: data, encoding: .utf8),
+              !pem.contains("PRIVATE KEY"),
+              let begin = pem.range(of: "-----BEGIN CERTIFICATE-----"),
+              let end = pem.range(of: "-----END CERTIFICATE-----",
+                                  range: begin.upperBound..<pem.endIndex),
+              let decoded = Data(base64Encoded: String(pem[begin.upperBound..<end.lowerBound])
+                .filter { !$0.isWhitespace }),
+              SecCertificateCreateWithData(nil, decoded as CFData) != nil else {
+            throw NSError(domain: "I2PdiOS", code: 11,
+                          userInfo: [NSLocalizedDescriptionKey: "This is not a valid PEM certificate"])
+        }
+        let directory = try prepareDataDirectory()
+            .appendingPathComponent("certificates/reseed", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stem = String(source.deletingPathExtension().lastPathComponent
+            .filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+            .prefix(32))
+        let filename = "custom-\(stem.isEmpty ? "reseed" : stem)-\(UUID().uuidString.prefix(8)).crt"
+        try data.write(to: directory.appendingPathComponent(filename), options: .atomic)
+        return filename
+    }
+
+    func importedReseedCertificates() -> [String] {
+        guard let support = try? FileManager.default.url(for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: false) else { return [] }
+        let directory = support.appendingPathComponent("i2pd/certificates/reseed")
+        return ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0.hasPrefix("custom-") && $0.hasSuffix(".crt") }.sorted()
+    }
+
+    func removeImportedReseedCertificate(_ filename: String) throws {
+        guard filename.hasPrefix("custom-"), filename.hasSuffix(".crt"),
+              !filename.contains("/"), !filename.contains("\\") else { return }
+        let support = try FileManager.default.url(for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: false)
+        try FileManager.default.removeItem(at: support
+            .appendingPathComponent("i2pd/certificates/reseed")
+            .appendingPathComponent(filename))
+    }
+
+    func applyOutproxy(_ url: String?) {
+        guard state == .running, !outproxyApplying else { return }
+        outproxyError = nil
+        outproxyApplying = true
+        let requested = url ?? ""
+        queue.async { [weak self] in
+            var error = [CChar](repeating: 0, count: 1024)
+            let succeeded = requested.withCString {
+                i2pd_set_outproxy($0, &error, Int32(error.count)) == 1
+            }
+            let message = String(cString: error)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.outproxyApplying = false
+                guard self.state == .running else { return }
+                if succeeded {
+                    self.activeOutproxyURL = requested.isEmpty ? nil : requested
+                    self.refreshBrowserReadiness()
+                } else {
+                    self.outproxyError = message.isEmpty ? "Could not apply outproxy" : message
+                }
+            }
+        }
+    }
 
     private func monitorBrowserReadiness() {
         readinessMonitor?.cancel()
@@ -129,9 +254,9 @@ final class RouterStore: ObservableObject {
             next = .connectingPeers
         } else if snapshot.inbound_tunnels == 0 || snapshot.outbound_tunnels == 0 {
             next = .buildingTunnels
-        } else if snapshot.socks_proxy_ready == 0 {
+        } else if (activeOutproxyURL == nil ? snapshot.socks_proxy_ready : snapshot.http_proxy_ready) == 0 {
             next = .startingProxy
-        } else if snapshot.socks_destination_ready == 0 {
+        } else if (activeOutproxyURL == nil ? snapshot.socks_destination_ready : snapshot.http_destination_ready) == 0 {
             next = .buildingBrowserTunnels
         } else {
             next = .ready
@@ -233,6 +358,8 @@ final class RouterStore: ObservableObject {
                 self.endShutdownBackgroundTask()
                 self.state = .stopped
                 self.browserReadiness = .stopped
+                self.activeOutproxyURL = nil
+                self.outproxyApplying = false
                 self.shutdownStartedAt = nil
                 self.shutdownDeadline = nil
                 self.shutdownConnectedPeers = 0
@@ -323,6 +450,27 @@ final class RouterStore: ObservableObject {
         )
         let directory = support.appendingPathComponent("i2pd", isDirectory: true)
         try files.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        // Keep downloaded data in Files > On My iPhone > i2pd. The tunnel's
+        // configuration stays separate from any tunnels.conf edited by a user.
+        let documents = try files.url(for: .documentDirectory, in: .userDomainMask,
+                                      appropriateFor: nil, create: true)
+        let torrents = documents.appendingPathComponent("Torrents", isDirectory: true)
+        try files.createDirectory(at: torrents, withIntermediateDirectories: true)
+        let tunnelConfigs = directory.appendingPathComponent("tunnels.d", isDirectory: true)
+        try files.createDirectory(at: tunnelConfigs, withIntermediateDirectories: true)
+        let torrentConfig = tunnelConfigs.appendingPathComponent("i2pd-ios-torrents.conf")
+        if !files.fileExists(atPath: torrentConfig.path) {
+            let contents = """
+            [iOS Torrents]
+            type=torrents
+            keys=i2pd-ios-torrents.dat
+            torrentsdir=\(torrents.path)
+            dht=true
+
+            """
+            try contents.write(to: torrentConfig, atomically: true, encoding: .utf8)
+        }
 
         // Reseed certificates ship with the pinned i2pd source. Keep any user data intact.
         if let bundled = Bundle.main.url(forResource: "certificates", withExtension: nil) {

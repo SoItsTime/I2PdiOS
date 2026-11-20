@@ -159,7 +159,8 @@ struct RouterDiagnosticsView: View {
                 Section("Local services") {
                     LabeledContent("HTTP proxy", value: snapshot.http_proxy_ready != 0 ? "127.0.0.1:4444" : "Starting…")
                     LabeledContent("SOCKS proxy", value: snapshot.socks_proxy_ready != 0 ? "127.0.0.1:4447" : "Starting…")
-                    LabeledContent("Browser tunnels", value: snapshot.socks_destination_ready != 0 ? "Ready" : "Building…")
+                    LabeledContent("HTTP browser tunnels", value: snapshot.http_destination_ready != 0 ? "Ready" : "Building…")
+                    LabeledContent("SOCKS browser tunnels", value: snapshot.socks_destination_ready != 0 ? "Ready" : "Building…")
                     if !text(of: snapshot.http_proxy_destination).isEmpty {
                         Text("HTTP destination: \(text(of: snapshot.http_proxy_destination))")
                             .font(.caption.monospaced())

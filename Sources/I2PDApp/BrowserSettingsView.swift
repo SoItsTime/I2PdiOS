@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BrowserSettingsView: View {
     @EnvironmentObject private var settings: BrowserSettingsStore
+    @EnvironmentObject private var router: RouterStore
     @StateObject private var viewState = BrowserSettingsViewState()
 
     var body: some View {
@@ -35,14 +36,64 @@ struct BrowserSettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Outproxy") {
+                Toggle("Allow non-.i2p websites", isOn: $viewState.outproxyEnabled)
+                Text("I2P HTTP outproxy address")
+                    .font(.subheadline)
+                TextField("http://outproxy.example.i2p:3128", text: $viewState.outproxyURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                Button("Save and apply outproxy") {
+                    if settings.saveOutproxy(url: viewState.outproxyURL,
+                                             enabled: viewState.outproxyEnabled) {
+                        viewState.outproxyURL = settings.outproxyURL
+                        viewState.outproxyError = nil
+                        viewState.didSaveOutproxy = true
+                        router.applyOutproxy(settings.activeOutproxyURL)
+                    } else {
+                        viewState.didSaveOutproxy = false
+                        viewState.outproxyError = "Enter an http:// address ending in .i2p, with an optional port."
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(router.state == .starting || router.state == .stopping || router.outproxyApplying)
+                LabeledContent("Non-.i2p websites", value: router.activeOutproxyURL == nil ? "Blocked" : "Allowed")
+                if let error = viewState.outproxyError ?? router.outproxyError {
+                    Text(error).foregroundStyle(.red).font(.footnote)
+                } else if viewState.didSaveOutproxy {
+                    Label(router.state != .running
+                          ? "Outproxy settings saved for the next connection"
+                          : router.activeOutproxyURL == settings.activeOutproxyURL
+                            ? "Outproxy settings applied" : "Applying outproxy settings…",
+                          systemImage: router.state == .running && router.activeOutproxyURL != settings.activeOutproxyURL
+                            ? "hourglass" : "checkmark.circle.fill")
+                        .foregroundStyle(router.state == .running && router.activeOutproxyURL != settings.activeOutproxyURL
+                                         ? Color.secondary : Color.green)
+                        .font(.footnote)
+                }
+                Text("Choose an I2P HTTP outproxy you trust. It can see which public sites you visit and unencrypted HTTP traffic. HTTPS protects page contents. Public sites stay blocked until this setting is enabled.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .navigationTitle("Browser settings")
+        .toolbar(.visible, for: .navigationBar)
+        .onAppear {
+            viewState.outproxyURL = settings.outproxyURL
+            viewState.outproxyEnabled = settings.outproxyEnabled
+        }
     }
 }
 
 @MainActor
 private final class BrowserSettingsViewState: ObservableObject {
     @Published var didApplyDefault = false
+    @Published var outproxyURL = ""
+    @Published var outproxyEnabled = false
+    @Published var outproxyError: String?
+    @Published var didSaveOutproxy = false
 }
 
 @MainActor

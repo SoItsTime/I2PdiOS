@@ -4,6 +4,7 @@
 #include "ClientContext.h"
 #include "Config.h"
 #include "HTTPServer.h"
+#include "HTTP.h"
 #include "I18N.h"
 #include "FS.h"
 #include "NetDb.hpp"
@@ -11,20 +12,26 @@
 #include "Transports.h"
 #include "Tunnel.h"
 #include "version.h"
+#include "TorrentsTunnel.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <exception>
 #include <limits>
 #include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
+#include <boost/asio/post.hpp>
+#include <boost/asio/use_future.hpp>
 
 namespace {
 std::mutex routerMutex;
 bool initialized = false;
 bool running = false;
+std::string defaultReseedURLs, defaultReseedFile;
 std::unique_ptr<i2p::http::HTTPServer> webConsole;
 
 void setError(char *buffer, int capacity, const char *message) {
@@ -63,13 +70,184 @@ void appendJSONString(std::string& json, const std::string& value) {
     }
     json.push_back('"');
 }
+
+bool normalizeOutproxyURL(const char *input, std::string& normalized) {
+    normalized.clear();
+    if (!input || !input[0]) return true;
+    const std::string value(input);
+    if (value.size() > 512 || !value.starts_with("http://")) return false;
+    auto authority = value.substr(7);
+    if (authority.ends_with('/')) authority.pop_back();
+    if (authority.empty() || authority.find_first_of("/?#@\\ \t\r\n") != std::string::npos)
+        return false;
+    const auto colon = authority.find(':');
+    if (colon != std::string::npos && authority.find(':', colon + 1) != std::string::npos)
+        return false;
+    auto host = authority.substr(0, colon);
+    std::transform(host.begin(), host.end(), host.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (host.size() <= 4 || !host.ends_with(".i2p") || host.front() == '.' ||
+        host.find("..") != std::string::npos ||
+        !std::all_of(host.begin(), host.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '-' || c == '.';
+        })) return false;
+    normalized = "http://" + host;
+    if (colon != std::string::npos) {
+        const auto port = authority.substr(colon + 1);
+        if (port.empty() || port.size() > 5 ||
+            !std::all_of(port.begin(), port.end(), [](unsigned char c) { return std::isdigit(c); }))
+            return false;
+        const auto number = std::stoi(port);
+        if (number == 0 || number > 65535) return false;
+        normalized += ":" + std::to_string(number);
+    }
+    return true;
 }
 
-int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
+bool normalizeReseedURL(const char *input, std::string& normalized, bool& isFile) {
+    normalized.clear();
+    isFile = false;
+    if (!input || !input[0]) return true;
+    std::string value(input);
+    if (value.size() > 2048 || !value.starts_with("https://") ||
+        value.find_first_of(",@?#\\ \t\r\n") != std::string::npos ||
+        std::any_of(value.begin(), value.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; }))
+        return false;
+    i2p::http::URL parsed;
+    if (!parsed.parse(value) || parsed.schema != "https" || parsed.host.empty() ||
+        !parsed.user.empty() || !parsed.pass.empty() || parsed.hasquery || !parsed.frag.empty())
+        return false;
+    isFile = value.size() >= 4 && value.substr(value.size() - 4) == ".su3";
+    if (!isFile && value.back() != '/') value.push_back('/');
+    normalized = std::move(value);
+    return true;
+}
+
+std::shared_ptr<i2p::torrents::TorrentsTunnel> torrentTunnel() {
+    if (!running) return {};
+    const auto& tunnels = i2p::client::context.GetTorrentsTunnels();
+    for (const auto& item : tunnels)
+        if (std::string_view(item.second->GetName()) == "iOS Torrents") return item.second;
+    return {};
+}
+
+void appendJSONNumber(std::string& json, uint64_t value) {
+    json += std::to_string(value);
+}
+}
+
+int32_t i2pd_copy_torrents_json(char *buffer, int32_t capacity) {
+    std::lock_guard<std::mutex> lock(routerMutex);
+    auto tunnel = torrentTunnel();
+    if (!tunnel) return -1;
+    try {
+        auto result = boost::asio::post(tunnel->GetService(), boost::asio::use_future([tunnel] {
+            std::string json = "[";
+            bool first = true;
+            for (int id : tunnel->GetTorrentIDs()) {
+                auto torrent = tunnel->FindTorrentByID(id);
+                if (!torrent) continue;
+                if (!first) json.push_back(',');
+                first = false;
+                json += "{\"id\":";
+                appendJSONNumber(json, id);
+                json += ",\"name\":";
+                appendJSONString(json, std::string(torrent->GetName()));
+                json += ",\"status\":";
+                appendJSONNumber(json, torrent->GetStatus());
+                json += ",\"totalBytes\":";
+                appendJSONNumber(json, torrent->GetLength());
+                json += ",\"leftBytes\":";
+                appendJSONNumber(json, torrent->GetLeft());
+                json += ",\"downloadRate\":";
+                appendJSONNumber(json, torrent->GetDownloadRate());
+                json += ",\"uploadRate\":";
+                appendJSONNumber(json, torrent->GetUploadRate());
+                json += ",\"error\":";
+                appendJSONString(json, std::string(torrent->GetErrorStr()));
+                json.push_back('}');
+            }
+            json.push_back(']');
+            return json;
+        })).get();
+        if (result.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return -1;
+        if (buffer && capacity > 0 && static_cast<size_t>(capacity) >= result.size())
+            std::memcpy(buffer, result.data(), result.size());
+        return static_cast<int32_t>(result.size());
+    } catch (...) { return -1; }
+}
+
+int i2pd_add_magnet(const char *magnet, char *error, int error_capacity) {
+    std::lock_guard<std::mutex> lock(routerMutex);
+    auto tunnel = torrentTunnel();
+    if (!tunnel) { setError(error, error_capacity, "Torrent tunnel is not running"); return 0; }
+    if (!magnet || std::strlen(magnet) > 8192 || !std::string_view(magnet).starts_with("magnet:?")) {
+        setError(error, error_capacity, "Enter a valid I2P magnet link"); return 0;
+    }
+    try {
+        std::string value(magnet);
+        auto added = boost::asio::post(tunnel->GetService(), boost::asio::use_future([tunnel, value] {
+            auto [torrent, id] = tunnel->AddMagnet(value);
+            return id > 0 && torrent && !torrent->GetError();
+        })).get();
+        if (added) return 1;
+        setError(error, error_capacity, "i2pd could not add this magnet link");
+    } catch (const std::exception& e) { setError(error, error_capacity, e.what()); }
+    return 0;
+}
+
+int i2pd_add_torrent_file(const uint8_t *bytes, int32_t length, char *error, int error_capacity) {
+    std::lock_guard<std::mutex> lock(routerMutex);
+    auto tunnel = torrentTunnel();
+    if (!tunnel) { setError(error, error_capacity, "Torrent tunnel is not running"); return 0; }
+    if (!bytes || length <= 0 || length > 8 * 1024 * 1024) {
+        setError(error, error_capacity, "Torrent file must be under 8 MB"); return 0;
+    }
+    try {
+        std::string value(reinterpret_cast<const char *>(bytes), length);
+        auto added = boost::asio::post(tunnel->GetService(), boost::asio::use_future([tunnel, value = std::move(value)] {
+            auto [torrent, id] = tunnel->AddTorrent(value);
+            return id > 0 && torrent && !torrent->GetError();
+        })).get();
+        if (added) return 1;
+        setError(error, error_capacity, "i2pd rejected this torrent file");
+    } catch (const std::exception& e) { setError(error, error_capacity, e.what()); }
+    return 0;
+}
+
+int i2pd_torrent_action(int32_t id, int32_t action, char *error, int error_capacity) {
+    std::lock_guard<std::mutex> lock(routerMutex);
+    auto tunnel = torrentTunnel();
+    if (!tunnel) { setError(error, error_capacity, "Torrent tunnel is not running"); return 0; }
+    if (id <= 0 || action < 0 || action > 3) {
+        setError(error, error_capacity, "Invalid torrent action"); return 0;
+    }
+    bool succeeded = action == 0 ? tunnel->StopTorrent(id) :
+                     action == 1 ? tunnel->StartTorrent(id) :
+                     tunnel->RemoveTorrent(id, action == 3);
+    if (!succeeded) setError(error, error_capacity, "Torrent is no longer available");
+    return succeeded ? 1 : 0;
+}
+
+int i2pd_start_router(const char *data_dir, const char *outproxy_url,
+                      const char *reseed_url, char *error, int error_capacity) {
     std::lock_guard<std::mutex> lock(routerMutex);
     if (running) return 1;
     if (!data_dir || !data_dir[0]) {
         setError(error, error_capacity, "Missing router data directory");
+        return 0;
+    }
+
+    std::string outproxy;
+    if (!normalizeOutproxyURL(outproxy_url, outproxy)) {
+        setError(error, error_capacity, "Outproxy must be an http:// address ending in .i2p, with an optional port");
+        return 0;
+    }
+
+    std::string reseed;
+    bool reseedIsFile = false;
+    if (!normalizeReseedURL(reseed_url, reseed, reseedIsFile)) {
+        setError(error, error_capacity, "Reseed URL must be an HTTPS server base URL or .su3 file URL");
         return 0;
     }
 
@@ -90,6 +268,7 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
                 "--httpproxy.enabled=true",
                 "--httpproxy.address=127.0.0.1",
                 "--httpproxy.port=4444",
+                "--httpproxy.senduseragent=true",
                 "--socksproxy.enabled=true",
                 "--socksproxy.address=127.0.0.1",
                 "--socksproxy.port=4447",
@@ -101,10 +280,14 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
                 "--ntcp2.published=false",
                 "--ssu2.published=true"
             };
+            if (!outproxy.empty())
+                arguments.push_back("--httpproxy.outproxy=" + outproxy);
             std::vector<char *> argv;
             argv.reserve(arguments.size());
             for (auto &argument : arguments) argv.push_back(argument.data());
             i2p::api::InitI2P(static_cast<int>(argv.size()), argv.data(), "I2PdiOS");
+            i2p::config::GetOption("reseed.urls", defaultReseedURLs);
+            i2p::config::GetOption("reseed.file", defaultReseedFile);
             // The embedded API does not set this the way the standalone daemon does.
             // Without it, reseed and family certificates are sought at /reseed and /family.
             i2p::fs::SetCertsDir(std::string(data_dir) + "/certificates");
@@ -114,6 +297,20 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
             i2p::config::GetOption("http.lang", consoleLanguage);
             i2p::i18n::SetLanguage(consoleLanguage);
             initialized = true;
+        } else if (!i2p::config::SetOption("httpproxy.outproxy", outproxy)) {
+            setError(error, error_capacity, "Could not configure HTTP outproxy");
+            return 0;
+        }
+
+        // Configure both forms before StartI2P starts netDb and its reseeder.
+        // Restore i2pd's original values when the user clears the custom URL.
+        const std::string activeReseedURLs = reseed.empty() || reseedIsFile ? defaultReseedURLs : reseed;
+        const std::string activeReseedFile = reseedIsFile ? reseed :
+            (reseed.empty() ? defaultReseedFile : std::string());
+        if (!i2p::config::SetOption("reseed.urls", activeReseedURLs) ||
+            !i2p::config::SetOption("reseed.file", activeReseedFile)) {
+            setError(error, error_capacity, "Could not configure reseed URL");
+            return 0;
         }
 
         // The embedded API parses bandwidth/share options but, unlike the
@@ -145,6 +342,37 @@ int i2pd_start_router(const char *data_dir, char *error, int error_capacity) {
         setError(error, error_capacity, exception.what());
     } catch (...) {
         setError(error, error_capacity, "Unknown i2pd startup error");
+    }
+    return 0;
+}
+
+int i2pd_set_outproxy(const char *outproxy_url, char *error, int error_capacity) {
+    std::lock_guard<std::mutex> lock(routerMutex);
+    if (!running) {
+        setError(error, error_capacity, "Router is not running");
+        return 0;
+    }
+    std::string outproxy;
+    if (!normalizeOutproxyURL(outproxy_url, outproxy)) {
+        setError(error, error_capacity, "Outproxy must be an http:// address ending in .i2p, with an optional port");
+        return 0;
+    }
+    std::string previous;
+    i2p::config::GetOption("httpproxy.outproxy", previous);
+    if (previous == outproxy) return 1;
+    try {
+        if (!i2p::config::SetOption("httpproxy.outproxy", outproxy))
+            throw std::runtime_error("Could not configure HTTP outproxy");
+        i2p::client::context.ReloadConfig();
+        return 1;
+    } catch (const std::exception &exception) {
+        i2p::config::SetOption("httpproxy.outproxy", previous);
+        try { i2p::client::context.ReloadConfig(); } catch (...) {}
+        setError(error, error_capacity, exception.what());
+    } catch (...) {
+        i2p::config::SetOption("httpproxy.outproxy", previous);
+        try { i2p::client::context.ReloadConfig(); } catch (...) {}
+        setError(error, error_capacity, "Could not apply HTTP outproxy");
     }
     return 0;
 }
@@ -206,7 +434,11 @@ int i2pd_get_status(I2PDStatusSnapshot *out) {
     out->sent_bytes = i2p::transport::transports.GetTotalSentBytes();
     out->receive_bytes_per_second = i2p::transport::transports.GetInBandwidth15s();
     out->send_bytes_per_second = i2p::transport::transports.GetOutBandwidth15s();
-    out->http_proxy_ready = i2p::client::context.GetHttpProxy() ? 1 : 0;
+    if (auto proxy = i2p::client::context.GetHttpProxy()) {
+        out->http_proxy_ready = 1;
+        auto destination = proxy->GetLocalDestination();
+        out->http_destination_ready = destination && destination->IsReady() ? 1 : 0;
+    }
     if (auto proxy = i2p::client::context.GetSocksProxy()) {
         out->socks_proxy_ready = 1;
         auto destination = proxy->GetLocalDestination();

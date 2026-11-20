@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var router: RouterStore
+    @EnvironmentObject private var settings: BrowserSettingsStore
 
     var body: some View {
         NavigationStack {
@@ -22,7 +23,7 @@ struct ContentView: View {
                     Button(actionTitle) {
                         if router.state == .running { router.stop() }
                         else if router.state == .stopping { router.forceDisconnect() }
-                        else { router.start() }
+                        else { router.start(outproxyURL: settings.activeOutproxyURL) }
                     }
                     .disabled(router.state == .starting ||
                               (router.state == .stopping && router.coreStopQueued))
@@ -57,7 +58,9 @@ struct ContentView: View {
                     }
                     .disabled(!router.canBrowse)
                     Text(router.canBrowse
-                         ? "The browser connection is ready. Individual I2P sites may still take time to respond."
+                         ? (router.activeOutproxyURL == nil
+                            ? "The browser connection is ready. Individual I2P sites may still take time to respond."
+                            : "The browser proxy is ready. Public site requests use the configured outproxy; individual sites may still take time to respond.")
                          : "The browser opens after i2pd connects to peers and builds working tunnels.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -69,6 +72,21 @@ struct ContentView: View {
                     } label: {
                         Label("Browser settings", systemImage: "gearshape")
                     }
+                    NavigationLink {
+                        ReseedSettingsView()
+                    } label: {
+                        Label("Reseed settings", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+
+                Section("Torrents") {
+                    NavigationLink {
+                        TorrentsView()
+                    } label: {
+                        Label("I2P torrents", systemImage: "arrow.down.circle")
+                    }
+                    Text("Add I2P magnets or .torrent files. Downloads appear in Files.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
 
                 Section("Router menu") {

@@ -380,3 +380,12 @@
  	};
  
  	class AddressBookSubscription
+--- a/libi2pd_client/TorrentsRPC.cpp
++++ b/libi2pd_client/TorrentsRPC.cpp
+@@ -11,5 +11,5 @@
+ #include <boost/version.hpp>
+-#if !defined(ANDROID) && (BOOST_VERSION >= 108100) // boost::json since 1.75, boost::url since 1.81
++#if !defined(ANDROID) && !defined(I2PD_IOS) && (BOOST_VERSION >= 108100) // native iOS UI avoids a local RPC listener
+ #include <boost/json.hpp>
+ #include <boost/url.hpp>
+ #include <boost/url/encode.hpp>
